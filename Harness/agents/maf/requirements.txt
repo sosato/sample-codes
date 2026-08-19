@@ -1,0 +1,22 @@
+# A) Microsoft Agent Framework 版 Hosted Agent の依存
+#
+# 検証環境 (2026-08-19, Python 3.11 / Windows) で実際に解決されたバージョン:
+#   agent-framework-core            1.13.0
+#   agent-framework-foundry         1.10.4
+#   agent-framework-openai          1.12.0        (agent-framework-foundry の依存)
+#   agent-framework-foundry-hosting 1.0.0b260730
+#   azure-ai-projects               2.3.0
+#
+# メタパッケージ `agent-framework` は全プロバイダー (Anthropic / Bedrock / Gemini /
+# Redis / Qdrant / Ollama ...) を引き込み依存が大きく肥大化するため **使わない**。
+# 必要な Foundry 系だけを指定する。
+#
+# 注意: agent-framework-foundry-hosting は prerelease。
+#       下限バージョンを外す場合は `pip install --pre` が必要。
+#
+# 警告: `agent-framework-github-copilot` は `github-copilot-sdk==1.0.2` を厳密ピン
+#       するため、Copilot SDK 版と同一環境に混在させないこと。
+
+agent-framework-foundry>=1.10.4
+agent-framework-foundry-hosting>=1.0.0b260730
+azure-identity>=1.19.0

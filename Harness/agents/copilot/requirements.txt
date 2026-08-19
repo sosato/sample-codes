@@ -1,0 +1,18 @@
+# B) GitHub Copilot SDK 版 Hosted Agent の依存
+#
+# ホスティングライブラリ (プロトコル層) — 使う方だけを有効にしてもよい
+azure-ai-agentserver-responses>=1.0.0b7
+azure-ai-agentserver-invocations>=1.0.0b5
+
+# エージェントフレームワーク
+# 実体は GitHub Copilot CLI を JSON-RPC で駆動する SDK。
+# CLI ランタイムバイナリはビルド時に取得しておくこと (Dockerfile 参照):
+#   python -m copilot download-runtime
+#
+# 重要: `agent-framework-github-copilot` は `github-copilot-sdk==1.0.2` を
+#       厳密ピンしているため、MAF 版と**同一環境に混在させない**こと
+#       (混在させると 1.0.2 へダウングレードされる)。
+github-copilot-sdk>=1.0.9
+
+# Foundry の Entra エージェント ID からトークンを取得するため
+azure-identity>=1.19.0

@@ -1,0 +1,37 @@
+# azd の `azure.ai.agent` サービス定義サンプル (GitHub Copilot SDK 版)
+#
+# 通常は `azd ai agent init --protocol responses --deploy-mode code` が生成する。
+# Copilot SDK は Copilot CLI ランタイムを必要とするため、ZIP デプロイで
+# 起動に失敗する場合は Dockerfile を使うコンテナデプロイへ切り替える (R2)。
+#
+# 参考: https://learn.microsoft.com/azure/foundry/agents/quickstarts/quickstart-deploy-own-code
+
+name: three-step-copilot
+
+services:
+  three-step-copilot:
+    host: azure.ai.agent
+    language: python
+    project: .
+    env:
+      AZURE_AI_MODEL_DEPLOYMENT_NAME: gpt-5.6-terra
+      HARNESS_PROTOCOL: responses
+
+      # --- BYOM (Foundry プロジェクトの OpenAI 互換ルートを使う) ---------
+      COPILOT_PROVIDER_TYPE: openai
+      # Azure OpenAI ホストを使う場合は次の 3 つに切り替える:
+      #   COPILOT_PROVIDER_TYPE: azure
+      #   AZURE_OPENAI_ENDPOINT: https://<account>.openai.azure.com
+      #   COPILOT_API_VERSION: 2025-04-01-preview
+
+      # --- Copilot CLI ランタイム (R2 対策) ------------------------------
+      # $HOME はターン間で永続化されるため、CLI の状態はそこへ置く
+      COPILOT_HOME: /home/site/.copilot
+      HARNESS_LOG_DIR: /home/site/harness-logs
+      # コンテナに焼き込んだバイナリを使う場合は次を有効化する
+      # COPILOT_CLI_PATH: /opt/copilot-runtime/copilot
+      # COPILOT_SKIP_CLI_DOWNLOAD: "1"
+
+      # --- 素の推論に近づけるための設定 ----------------------------------
+      COPILOT_CLIENT_MODE: empty
+      COPILOT_SYSTEM_MESSAGE_MODE: replace

@@ -1,0 +1,23 @@
+# azd の `azure.ai.agent` サービス定義サンプル (MAF 版)
+#
+# 通常は `azd ai agent init --protocol responses --deploy-mode code` が
+# 対話形式で生成する。ここでは生成後に確認・調整すべき箇所を明示するための参考。
+# 実際に使う際は `agents/maf/` 直下に `azure.yaml` として配置する。
+#
+# 参考: https://learn.microsoft.com/azure/foundry/agents/quickstarts/quickstart-deploy-own-code
+
+name: three-step-maf
+
+services:
+  three-step-maf:
+    host: azure.ai.agent
+    language: python
+    project: .
+    env:
+      # Hosted Agent ランタイムは FOUNDRY_PROJECT_ENDPOINT /
+      # AZURE_AI_MODEL_DEPLOYMENT_NAME / APPLICATIONINSIGHTS_CONNECTION_STRING を
+      # 自動注入する。ここでは比較ハーネス固有の値だけを渡す。
+      AZURE_AI_MODEL_DEPLOYMENT_NAME: gpt-5.6-terra
+      HARNESS_PROTOCOL: responses
+      # $HOME はターン間で永続化されるため、ログはそこへ書く
+      HARNESS_LOG_DIR: /home/site/harness-logs

@@ -1,0 +1,18 @@
+# ローカル検証用の仮想環境 / 実行成果物
+.venv/
+.venv-*/
+__pycache__/
+*.pyc
+
+# 実行ログ (JSONL) — 生データはコミットしない
+logs/*.jsonl
+
+# tools/sync_shared.py が生成する複製 (正本は リポジトリ直下の shared/)
+agents/*/shared/
+
+# azd が生成する環境ファイル (サブスクリプション ID 等を含む)
+.azure/
+*.env
+
+# PoC 実行結果 (エンドポイント名を含みうる)
+agents/copilot/poc_byom_result.json
