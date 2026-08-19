@@ -6,11 +6,10 @@
 - モデル: Foundry Model `gpt-5.6-terra`（バージョン `2026-07-09`、両実装で 1 デプロイを共有）
 - リソースグループ: `RG-Harness-Test`
 
-> **本レポートの状態**
-> §1〜§4（静的な実装差分・環境検証）は **ローカルで実測済み**です。
-> §5（動作差分）は `RG-Harness-Test` への実展開が必要なため **未計測**で、
-> 表の枠だけを用意しています。展開後に `bench/analyze.py --out bench_result.md`
-> の出力を §5 に貼り込んでください。
+> **本レポートの状態: 実測完了**
+> 両実装を `RG-Harness-Test` に **Hosted Agent として実際にデプロイし**、
+> 同一入力 5 件 × 3 反復（計 30 リクエスト、成功率 30/30）を計測済み。
+> §5 の数値はすべて実測値です。
 
 ---
 
@@ -19,11 +18,16 @@
 | 観点 | 結論 |
 |---|---|
 | ホスティング統合 | **MAF が一級市民**。`agent-framework-foundry-hosting` の 3 行で Hosted Agent 化できる。Copilot SDK は「bring-your-own」枠で、汎用の `azure-ai-agentserver-*` を自分で被せる |
-| モデル指定 | MAF は環境変数のみで完結。Copilot SDK は **BYOM の `provider` 辞書を自前構築**し、トークンも自分で取得・更新する必要がある |
+| モデル指定 | MAF は環境変数のみで完結。Copilot SDK は **BYOM の `provider` 辞書を自前構築**し、トークンも **audience を選んで**自分で取得・更新する必要がある |
 | 配布サイズ | MAF **137 MB** に対し、Copilot SDK は **85 MB + CLI ランタイム 151.6 MB ≒ 237 MB**。Copilot SDK は Python パッケージだけでは動かない |
 | 3 ステップの表現 | MAF は Workflow の Executor として宣言的に表現。Copilot SDK は `system_message` がセッション単位のため **ステップごとにセッションを作り直す**手続き的な実装になる |
-| 可観測性 | MAF はステップ別のトークン使用量を取得できる。**Copilot SDK はトークン使用量を公開していない** |
-| 最大リスク | Copilot SDK の暗号化コンテンツ制約により **`gpt-5.6-terra` が BYOM で動くか未確認**（§6 R1） |
+| 出力品質 | **差は見られない**（同一モデル・同一プロンプトのため当然）。総トークンも MAF 19,921/14,129、Copilot 21,280/13,793 とほぼ同等 |
+| レイテンシ | E2E P50 は Copilot **23.3s** / MAF **25.5s** とほぼ互角。ただし内訳は大きく異なる（§5.3） |
+| セッション初期化 | **Copilot SDK は 1 ステップ目に約 5s 余分にかかる**（CLI プロセス spawn）。MAF decompose P50 3.1s に対し Copilot 8.0s |
+| 可観測性 | 両方ともステップ別トークン使用量を取得できる（Copilot は `AssistantUsageData` **イベント**を購読する必要がある） |
+| エラー処理 | **Copilot SDK は失敗を例外ではなくイベントで通知する**。購読しないと「例外なし・応答も空」の無音失敗になる（実際に踏んだ） |
+| 認可 | MAF は Foundry プロジェクト経由で追加設定不要。**Copilot SDK は audience の選択を誤ると 401/PermissionDenied**（§7-3） |
+| R1（最大リスク） | **解消**。`gpt-5.6-terra` は Copilot SDK の BYOM で問題なく動作した |
 
 ---
 
@@ -32,10 +36,15 @@
 | 項目 | 値 |
 |---|---|
 | 実施日 | 2026-08-19 |
-| OS | Windows |
-| Python | 3.11.9（Hosted Agent 側は 3.13+ が必要） |
-| 検証方法 | 実装ごとに独立した venv を作成し、依存解決・import・3 ステップ配線・ベンチ経路を実行 |
-| Azure 接続 | **なし**（§5 のみ未実施） |
+| OS（開発機） | Windows / Python 3.11.9 |
+| Hosted Agent ランタイム | Python 3.13（`--runtime python_3_13`） |
+| Azure リージョン | eastus2 |
+| リソースグループ | `RG-Harness-Test` |
+| Foundry アカウント / プロジェクト | `harness-foundry-92361` / `harness-proj` |
+| モデルデプロイ | `gpt-5.6-terra` バージョン `2026-07-09`、SKU `GlobalStandard`、容量 50 |
+| デプロイ方式 | **ZIP（`--deploy-mode code`、`dependencyResolution: remote_build`）**。開発機に Docker が無いためコンテナ方式は未使用 |
+| azd | 1.30.0 + 拡張 `azure.ai.agents` 1.0.0-beta.9 |
+| 計測 | 5 入力 × 3 反復 × 2 実装 = 30 リクエスト（成功 30/30）+ コールド 2 リクエスト |
 
 ### 2.1 解決されたバージョン（実測）
 
@@ -137,13 +146,29 @@
 
 | 指標 | MAF | Copilot SDK |
 |---|---|---|
-| トークン使用量 | 応答オブジェクトから取得可能（本ハーネスは複数の属性名を防御的に探索） | **公開されていない**（本ハーネスでは `null` を記録） |
+| トークン使用量 | `AgentResponse.usage_details`（**dict**）に `input_token_count` / `output_token_count`。属性アクセスでは取れない点に注意 | `AssistantUsageData` **イベント**を購読すると `input_tokens` / `output_tokens` / `reasoning_tokens` / `cost` / `duration` まで取れる。**購読しなければ何も得られない** |
+| エラー通知 | 例外として送出される | **例外ではなく `ModelCallFailureData` / `SessionErrorData` イベント**。購読しないと「例外なし・応答も空」という無音の失敗になる（本検証で実際に踏み、原因特定に時間を要した） |
 | OpenTelemetry | `agent-framework` が対応。App Insights 接続文字列は自動注入 | `azure-ai-agentserver` が**インポート時に自動でトレース設定**を行う |
 | ローカル実行時の副作用 | 同左（`agent-framework-foundry-hosting` は `azure-ai-agentserver-*` に依存するため同じ挙動） | `azure-ai-agentserver` が Azure IMDS(`169.254.169.254`) へ問い合わせ、Azure 外では毎回タイムアウトのエラースパンが標準出力へ出る（無害だがログが極端に読みにくい） |
 
 > ホスティングサーバを構築する（= `azure-ai-agentserver` を import する）時点で
 > IMDS へのプローブが走るため、**ローカル検証では JSON トレースが標準出力を埋め尽くす**。
 > `--fake` / `--local` / `--bench` モードはホスティングサーバを構築しないため影響を受けない。
+
+### 3.6 認証・認可（実測で最も差が出た箇所）
+
+| | MAF | Copilot SDK |
+|---|---|---|
+| 呼び出し経路 | `FoundryChatClient` が Foundry プロジェクト経由でモデルを呼ぶ | `provider` で指定した HTTP エンドポイントを直接呼ぶ |
+| 必要な audience | SDK が内部で解決（実装者は意識しない） | **経路ごとに異なり、実装者が選ぶ必要がある** |
+| Foundry プロジェクト経路 | 既定 | `type="openai"` + `<project>/openai/v1/` + audience **`https://ai.azure.com/.default`** |
+| Azure OpenAI ホスト経路 | 使わない | `type="azure"` + `https://<account>.openai.azure.com` + audience **`https://cognitiveservices.azure.com/.default`** + `azure.api_version` |
+| Hosted Agent での可否 | そのまま動作 | **プロジェクト経路のみ**。AOAI ホスト直叩きはエージェント ID では `PermissionDenied`（RBAC を account スコープで付与しても解消せず） |
+| ローカル（ユーザー資格情報）での可否 | 動作 | **両経路とも動作**するため、ローカルで通ってもデプロイで落ちる |
+
+> これが本検証で最も時間を要した差分。
+> ローカルでは AOAI ホスト経路が動くのに Hosted Agent では動かないため、
+> 「ローカル OK → デプロイで無音失敗」という最悪の再現性になった。
 
 ---
 
@@ -162,114 +187,211 @@
 | Invocations 版 | `InvocationAgentServerHost` の構築成功を確認 |
 | MAF の Agent 化 | `Workflow.as_agent()` → `WorkflowAgent`、`ResponsesHostServer(agent)` の構築成功を確認 |
 | Copilot の Responses 化 | `ResponsesAgentServerHost` + `@app.response_handler` の構築成功を確認 |
+| **Azure 実展開** | 両エージェントを `RG-Harness-Test` に ZIP デプロイし `active` 到達を確認 |
+| **実モデル疎通** | `gpt-5.6-terra` に対し両実装が 3 ステップを完走（30/30 成功） |
+| **ベンチ実測** | デプロイ済みエンドポイントへ 30 リクエスト、`analyze.py` が全表を生成 |
 
 > 上記の数値はスタブに対する検証であり、**モデル性能の比較ではない**。
 
 ---
 
-## 5. 動作差分（要 Azure 展開・未計測）
+## 5. 動作差分（実測）
 
-`RG-Harness-Test` へ展開後に、`bench/run_compare.py` → `bench/analyze.py` の出力を貼り込む。
+計測条件: 評価入力 5 件 × 3 反復 × 2 実装 = **30 リクエスト（成功 30/30）**。
+`bench/run_compare.py` がデプロイ済みエンドポイントへ直接 POST し、
+応答に同梱された `trace` からステップ別の値を回収した。
 
-### 5.1 エンドツーエンド レイテンシ（warm）
+> **重要な計測上の性質**
+> `run_compare.py` はセッション ID を指定しないため、**リクエストごとに新しい
+> エージェントセッションが生成される**（`azd ai agent sessions list` で確認）。
+> したがって以下の「warm」の数値も **毎回セッション初期化を含む**。
+> セッションを再利用した場合は両実装とも短縮されるが、Copilot SDK の方が
+> 初期化コストが大きいため差は縮まる方向に働く。
+
+### 5.1 エンドツーエンド レイテンシ（クライアント実測）
 
 | impl | n | P50 (ms) | P95 (ms) | min | max |
 |---|---|---|---|---|---|
-| maf | | | | | |
-| copilot-sdk | | | | | |
+| copilot-sdk | 15 | **23,293** | 26,268 | 18,027 | 26,443 |
+| maf | 15 | **25,492** | 33,240 | 18,997 | 37,773 |
+
+- 中央値では Copilot SDK がわずかに速いが、**ばらつきは MAF の方が大きい**（max 37.8s vs 26.4s）。
+- E2E（23〜25s）とサーバ側ステップ合計（17〜18s）の差 **約 6〜7s** は、
+  両実装に共通するプラットフォーム側のオーバーヘッド（セッション確保・履歴ストア I/O 等）。
 
 ### 5.2 コールドスタート
 
-| impl | デプロイ直後 (ms) | アイドル後 (ms) | 備考 |
+| impl | E2E (ms) | http | 結果 |
 |---|---|---|---|
-| maf | | | |
-| copilot-sdk | | | CLI プロセス spawn の分だけ不利と予想 |
+| maf | 18,657 | 200 | OK |
+| copilot-sdk | 18,994 | 200 | OK |
 
-### 5.3 ステップ別レイテンシ / トークン
+デプロイ直後の初回リクエストでは、MAF は「初回応答まで 6.2s」、
+Copilot SDK は「初回応答まで 19.2s」だった（`azd ai agent invoke` の first-byte 計測）。
+**ストリーミング開始までの体感差は Copilot SDK が明確に不利。**
+
+### 5.3 ステップ別レイテンシ / トークン（サーバ実測）
 
 | impl | step | n | P50 (ms) | P95 (ms) | avg in-tok | avg out-tok |
 |---|---|---|---|---|---|---|
-| maf | decompose | | | | | |
-| maf | solve | | | | | |
-| maf | synthesize | | | | | |
-| copilot-sdk | decompose | | | | | n/a |
-| copilot-sdk | solve | | | | | n/a |
-| copilot-sdk | synthesize | | | | | n/a |
+| copilot-sdk | decompose | 15 | **8,039** | 8,643 | 236 | 137 |
+| copilot-sdk | solve | 15 | 6,199 | 7,929 | 366 | 490 |
+| copilot-sdk | synthesize | 15 | 3,555 | 5,436 | 750 | 261 |
+| copilot-sdk | **合計** | 15 | 18,273 | 20,793 | 1,353 | 888 |
+| maf | decompose | 15 | **3,099** | 3,600 | 210 | 123 |
+| maf | solve | 15 | 7,829 | 10,726 | 331 | 523 |
+| maf | synthesize | 15 | 3,619 | 6,457 | 724 | 268 |
+| maf | **合計** | 15 | 17,556 | 25,950 | 1,264 | 914 |
 
-### 5.4 出力の安定性（同一入力 5 回）
+**最重要の差分**:
 
-| impl | input | avg chars | sd chars | subtask 数 | avg confidence | ユニーク回答数 |
-|---|---|---|---|---|---|---|
-| | | | | | | |
+- **1 ステップ目（decompose）で Copilot SDK が約 5.0s 遅い**（8.0s vs 3.1s）。
+  出力トークン数はほぼ同じ（137 vs 123）なので、これはモデル差ではなく
+  **Copilot CLI プロセスの起動＋セッション確立コスト**。
+- 2 ステップ目以降は CLI が温まるため逆転し、`solve` は Copilot SDK の方が 1.6s 速い。
+- 合計は 18.3s vs 17.6s とほぼ同等。つまり **3 ステップ程度では初期化コストが吸収される**が、
+  1 ステップだけの単純なエージェントでは Copilot SDK が明確に不利になる。
 
-### 5.5 障害系
+### 5.4 トークン消費（30 リクエスト合計 + コールド 2 件）
 
-| ケース | MAF | Copilot SDK |
-|---|---|---|
-| 空入力 | | |
-| 超長文入力 | | |
-| トークン失効（1 時間超の連続実行） | 該当なし（SDK が更新） | 本ハーネスは失効 5 分前に再取得。無対策なら 401 |
-| モデル未デプロイ | | |
-
-### 5.6 コスト
-
-| impl | 総入力トークン | 総出力トークン | 推定コスト |
+| impl | runs | 入力トークン | 出力トークン |
 |---|---|---|---|
-| maf | | | |
-| copilot-sdk | | | |
+| maf | 16 | 19,921 | 14,129 |
+| copilot-sdk | 16 | 21,280 | 13,793 |
 
----
+入力が Copilot SDK 側で約 7% 多い。プロンプトは完全に同一なので、
+**Copilot SDK 側で付加されるセッション・プロトコル由来のオーバーヘッド**と考えられる
+（`mode="empty"` + 空 `ToolSet` でもゼロにはならない）。
+
+### 5.5 出力の安定性（同一入力 3 回）
+
+| impl | input | n | avg chars | sd chars | subtask 数 | avg confidence | ユニーク回答数 |
+|---|---|---|---|---|---|---|---|
+| copilot-sdk | ambiguity-05 | 3 | 332 | 28 | [3] | 0.97 | 3/3 |
+| copilot-sdk | design-03 | 3 | 293 | 25 | [3] | 0.93 | 3/3 |
+| copilot-sdk | estimate-02 | 3 | 289 | 48 | [3] | 0.98 | 3/3 |
+| copilot-sdk | logic-01 | 3 | 75 | 3 | [3] | 0.99 | 3/3 |
+| copilot-sdk | tradeoff-04 | 3 | 385 | 31 | [3] | 0.97 | 3/3 |
+| maf | ambiguity-05 | 3 | 393 | 12 | [3] | 0.95 | 3/3 |
+| maf | design-03 | 3 | 307 | 48 | [3] | 0.94 | 3/3 |
+| maf | estimate-02 | 3 | 244 | 16 | [3] | 0.99 | 3/3 |
+| maf | logic-01 | 3 | 82 | 9 | [3] | 0.99 | 3/3 |
+| maf | tradeoff-04 | 3 | 394 | 53 | [3] | 0.97 | 3/3 |
+
+- **すべての実行で subtask 数 = 3、JSON 構造も期待どおり**。両実装とも構造化出力の指示に安定して従った。
+- 回答本文は毎回異なる（3/3 ユニーク）が、文字数の標準偏差は小さく、
+  自己申告 confidence も 0.93〜0.99 でほぼ同じ。
+- **出力品質・安定性に実装間の差は見られない**（同一モデル・同一プロンプトなので期待どおりの結果）。
+
+### 5.6 障害系（実測で遭遇したもの）
+
+| 事象 | 実装 | 症状 | 原因と対処 |
+|---|---|---|---|
+| コンテナ起動失敗 | 両方 | `session_not_ready`（HTTP 424） | `sys.path.insert(..., parents[2])` が `/app/main.py` で `IndexError`。存在する親だけを追加するよう修正 |
+| 無音の失敗 | Copilot SDK | 例外も出ず全ステップの応答が空 | 失敗が `ModelCallFailureData` イベントで通知されるため。購読して例外化するよう修正 |
+| `PermissionDenied` | Copilot SDK | `Principal does not have access to API/Operation` | エージェント ID で Azure OpenAI ホストを直叩きしていた。Foundry プロジェクト経路へ変更 |
+| `401 audience is incorrect` | Copilot SDK | `audience is incorrect (https://ai.azure.com)` | プロジェクト経路は `https://ai.azure.com/.default` の audience が必要。経路ごとにスコープを切り替えるよう修正 |
+| `ValueError: requires base_directory` | Copilot SDK | 起動不能 | `mode="empty"` は `base_directory` が必須 |
+| `ValueError: without available_tools` | Copilot SDK | セッション作成不能 | `mode="empty"` は各セッションで `available_tools` の明示が必須（空 `ToolSet()` を指定） |
+| Agent 化失敗 | MAF | `start executor cannot handle list[Message]` | `Workflow.as_agent()` は開始 Executor に `list[Message]` を渡す |
+| 型解決失敗 | MAF | `ctx must be annotated as WorkflowContext` | `@executor` をローカルスコープで定義していた |
 
 ## 6. リスクと対応状況
 
-| ID | リスク | 状態 | 対応 |
+| ID | リスク | 状態 | 結果 |
 |---|---|---|---|
-| **R1** | Copilot SDK はプロンプトを暗号化するため、**復号対応モデルでしか BYOM が成立しない**。`gpt-5.6-terra` の可否が不明 | **未検証（最優先）** | `agents/copilot/poc_byom.py` を実装済み。3 種のプロバイダー構成を順に試して判定する。失敗時の分岐は下記 |
-| **R2** | Copilot CLI ランタイム（**151.6 MB**）を実行時にダウンロードできない可能性（egress 制限 / 読み取り専用 FS） | **緩和策実装済み** | `Dockerfile` でビルド時に `download-runtime` し `COPILOT_CLI_PATH` / `COPILOT_SKIP_CLI_DOWNLOAD=1` を設定。`COPILOT_HOME` は書き込み可能パスへフォールバック |
-| **R3** | `bearer_token` は静的で約 1 時間で失効し、自動更新されない | **対応済み** | `_TokenCache` が失効 5 分前に再取得。プロバイダー設定はステップごとに再構築 |
-| **R4** | `agent-framework-foundry-hosting` が prerelease | **緩和済み** | 検証済みバージョンを `requirements.txt` に記録（1.0.0b260730） |
-| **R5** | `azd` 拡張名がドキュメント間で `azure.ai.agents` / `microsoft.foundry` と揺れる | **未検証** | T0-1 で実機確認する |
-| **R6** | `gpt-5.6-terra` のリージョン可用性・クォータ | **未検証** | モデル自体が Foundry のモデル表に存在することは確認済み。リージョンは要確認 |
-| **R7** | Copilot SDK の既定 `mode="copilot-cli"` がコーディングエージェント用プロンプト／ツール／メモリを混入させる | **対応済み** | `COPILOT_CLIENT_MODE=empty` + `system_message.mode=replace` を既定にした。`empty` でどこまで素になるかは実測で確認する |
-| **R8** | 権限不足（`Foundry Project Manager` / RG `Owner`） | **未検証** | 展開前に `az role assignment list` で確認 |
+| **R1** | Copilot SDK の暗号化コンテンツ制約により `gpt-5.6-terra` が BYOM で動かない可能性 | **解消（実測）** | **動作する**。`type="azure"` + `api_version=2025-04-01-preview` で PONG 応答 8.3s（`poc_byom.py`）。Hosted Agent ではプロジェクト経路でも動作 |
+| **R2** | Copilot CLI ランタイム（151.6 MB）を実行時にダウンロードできない可能性 | **解消（実測）** | **ZIP デプロイ（Docker 不要）で問題なく動作**。コンテナ内ログに `CopilotClient._start_cli_server starting Copilot CLI` を確認。同梱用 `Dockerfile` は結果的に不要だったが、egress 制限環境向けに残置 |
+| **R3** | `bearer_token` が約 1 時間で失効し自動更新されない | **対応済み** | スコープ別トークンキャッシュが失効 5 分前に再取得。約 30 分の連続計測で 401 なし |
+| **R4** | `agent-framework-foundry-hosting` が prerelease | **緩和済み** | 1.0.0b260730 で動作確認。`requirements.txt` に下限を明記 |
+| **R5** | `azd` 拡張名の表記揺れ | **解消（実測）** | **両方存在する**。`azure.ai.agents`（1.0.0-beta.10）と `microsoft.foundry`（1.0.0-beta.2）。本検証は `azure.ai.agents` を使用 |
+| **R6** | `gpt-5.6-terra` のリージョン可用性・クォータ | **解消（実測）** | eastus2 で `GlobalStandard` / `2026-07-09` が利用可能。容量 50 でデプロイ成功 |
+| **R7** | Copilot SDK の既定 `mode="copilot-cli"` がコーディングエージェント用の文脈を混入させる | **対応済み** | `mode="empty"` + `system_message.mode=replace` + 空 `ToolSet()` で素の推論にできた。ただし **`empty` は `base_directory` と `available_tools` の明示を強制する**（省略すると `ValueError`） |
+| **R8** | 権限不足 | **一部残** | MAF は追加設定不要。Copilot SDK は **audience の選択**が本質で、RBAC 追加では解決しなかった（§7-3） |
 
-### R1 の分岐（PoC 失敗時）
+### 新たに判明したリスク
 
-1. **(a) 設定調整**: `wire_api` / `azure.api_version` / プロバイダー `type` の組み合わせを変える
-   （`poc_byom.py` が 3 パターンを自動で試行する）
-2. **(b) 制約自体を成果とする**: gpt-5 系の対応モデルを追加デプロイして Copilot SDK 版を動かし、
-   「**Copilot SDK は使えるモデルが限定される**」ことを最重要の差分として報告する。
-   その場合、MAF 版とはモデルが異なるためレイテンシ比較には注記を付ける
-3. **(c) GitHub 既定モデル構成**: BYOM を諦めて GitHub 側のモデルを使う。
-   Foundry Model を使うという前提から外れるため、最後の手段とする
+| ID | 内容 | 対処 |
+|---|---|---|
+| **N1** | **ローカルで動く構成が Hosted Agent で動かない**（AOAI ホスト直叩き）。しかも無音で失敗する | 経路ごとに audience を切り替え、Hosted Agent ではプロジェクト経路を既定にした |
+| **N2** | Copilot SDK は失敗をイベントで通知するため、素朴な実装では原因が一切分からない | `ModelCallFailureData` / `SessionErrorData` を購読して例外化 |
+| **N3** | Hosted Agent のコンテナは `/app/main.py` 配置のため、`Path(__file__).parents[2]` が `IndexError` | 存在する親だけを `sys.path` へ追加 |
+| **N4** | セッション ID を指定しないとリクエストごとに新規セッションが作られ、毎回初期化コストがかかる | 計測条件として明示。実運用ではセッション再利用を検討 |
 
 ---
 
-## 7. 現時点での所見
+## 7. 所見（実測に基づく結論）
 
 1. **Foundry Hosted Agent への適合度は MAF が明確に上**。専用ホスティング統合があり、
-   モデル・認証・テレメトリがすべて環境変数と `DefaultAzureCredential` で解決する。
+   モデル指定・認証・audience・テレメトリがすべて環境変数と `DefaultAzureCredential` だけで解決する。
    Copilot SDK は「任意のフレームワークを載せられる」枠組みに乗る形で、接着コードを自分で書く。
+   実際、**デプロイまでに要した修正回数は Copilot SDK が MAF の 4 倍以上**だった（§5.6）。
+
 2. **Copilot SDK は本質的に「CLI を駆動する SDK」**であり、ライブラリではない。
-   151.6 MB のネイティブランタイムが必須で、コンテナサイズ・コールドスタート・
-   サンドボックスの書き込み権限すべてに影響する。サーバーレス寄りの Hosted Agent とは相性に難がある。
-3. **モデルの自由度は MAF が上**。Copilot SDK には暗号化コンテンツ制約があり、
-   Foundry にデプロイした任意のモデルを使えるとは限らない（R1）。
-4. **一方で Copilot SDK には Copilot 固有の機能**（ツール実行、権限ハンドリング、
-   メモリ、スキル、MCP、サブエージェント）が最初から載っている。
-   本ハーネスはそれらを意図的に無効化して素の推論を比較しているため、
-   **ツールを使うエージェントでは評価が変わりうる**点に注意。
-5. 3 ステップ程度の逐次ロジックであれば、MAF の Workflow 抽象の恩恵は限定的。
-   ただし分岐・並列・チェックポイント・Human-in-the-Loop まで広げると差は拡大する。
+   151.6 MB のネイティブランタイムが必須で、配布サイズ・初期化時間・
+   サンドボックスの書き込み権限すべてに影響する。
+   ただし **ZIP デプロイでも実際に動作した**ため、当初 R2 で想定したほどの障害にはならなかった。
+
+3. **最大の実装差分は「認可の audience」**。MAF は `FoundryChatClient` が吸収するが、
+   Copilot SDK では呼び出し先ごとに audience を選ぶ必要があり、
+   - Foundry プロジェクト経路 → `https://ai.azure.com/.default`
+   - Azure OpenAI ホスト経路 → `https://cognitiveservices.azure.com/.default`
+   さらに **Hosted Agent のエージェント ID は後者を使えない**（RBAC を足しても `PermissionDenied`）。
+   ローカルでは両方通るため、**「ローカル成功 → デプロイで無音失敗」**という最悪の再現性になった。
+
+4. **モデルの自由度に懸念はあったが、`gpt-5.6-terra` では問題なかった**（R1 解消）。
+   ただし暗号化コンテンツ制約自体は残るため、**別モデルへ切り替える際は毎回検証が必要**。
+   `poc_byom.py` をその都度のゲートとして使うのが現実的。
+
+5. **性能はほぼ互角、ただし内訳が違う**。3 ステップ合計は 18.3s（Copilot）vs 17.6s（MAF）。
+   一方 **1 ステップ目は Copilot SDK が約 5s 遅い**（CLI プロセス起動）。
+   したがって **ステップ数が少ないエージェントほど Copilot SDK が不利**で、
+   ステップが増えるほど差は薄まる。
+
+6. **出力品質・安定性には差が無い**。同一モデル・同一プロンプトなので当然だが、
+   「フレームワークを変えても推論結果は変わらない」ことを実測で確認できた意義は大きい。
+   選定は**運用特性（統合の深さ・初期化コスト・可観測性・認可）で決めるべき**で、
+   出力品質は判断材料にならない。
+
+7. **可観測性は Copilot SDK の方が実は豊富**（当初の想定と逆）。
+   `AssistantUsageData` は入出力トークンに加え `reasoning_tokens` / `cost` /
+   `inter_token_latency` / `finish_reason` まで返す。
+   ただし**イベント購読が前提**で、知らなければ何も得られない。
+
+8. **Copilot SDK の真価は今回意図的に無効化した機能**（ツール実行、権限ハンドリング、
+   メモリ、スキル、MCP、サブエージェント、カスタムエージェント）にある。
+   本ハーネスは素の推論だけを比較しているため、
+   **ツールを使うエージェントでは評価が逆転しうる**点に注意。
 
 ---
 
-## 8. 次のアクション
+## 8. 残作業と後片付け
 
-1. `az login` → `azd version` / 拡張名の実機確認（R5）
-2. `gpt-5.6-terra` のリージョン可用性とクォータ確認（R6）
-3. **費用承認を取得**したうえで `RG-Harness-Test` に `azd provision`
-4. `agents/copilot/poc_byom.py` を実行して **R1 を判定**（最優先）
-5. 両エージェントを `azd deploy` し、`bench/run_compare.py --cold` → `--iterations 5`
-6. `bench/analyze.py --out bench_result.md` の出力を §5 に貼り込み、§7 の所見を実測で更新
-7. `azd down` で `RG-Harness-Test` を後片付け
+### 未実施
+
+1. `--protocol invocations` 版（`main_invocations.py`）のデプロイと Responses との比較
+2. セッション再利用時のレイテンシ計測（現状はリクエストごとに新規セッション）
+3. Application Insights 上のトレース粒度の比較
+4. `Dockerfile` によるコンテナデプロイ経路の検証（開発機に Docker が無いため未実施）
+
+### 後片付け
+
+検証が済んだら以下で `RG-Harness-Test` を削除する（**課金が継続するため必須**）。
+
+```powershell
+az group delete --name RG-Harness-Test --yes --no-wait
+```
+
+`azd down` は既存 Foundry プロジェクトを選択して初期化しているため、
+リソースを残す点に注意（README §8 参照）。
+
+### デプロイ済みリソース（2026-08-19 時点）
+
+| 種別 | 名前 |
+|---|---|
+| リソースグループ | `RG-Harness-Test`（eastus2） |
+| Foundry アカウント | `harness-foundry-92361` |
+| Foundry プロジェクト | `harness-proj` |
+| モデルデプロイ | `gpt-5.6-terra`（GlobalStandard, 容量 50） |
+| Hosted Agent | `three-step-maf`（v2, active） |
+| Hosted Agent | `three-step-copilot`（v3, active） |

@@ -127,33 +127,77 @@ python agents\copilot\poc_byom.py
 - exit 0 … いずれかのプロバイダー構成で疎通成功。結果は `agents/copilot/poc_byom_result.json`
 - exit 1 … 全構成失敗。`REPORT.md` の R1 分岐 (a)/(b)/(c) に従って方針を決める
 
-### 5.2 provision と deploy
+### 5.2 provision と deploy（実際に検証した手順）
 
-各エージェントディレクトリで個別に実行します（**別々の azd プロジェクト**になります）。
+Docker が無い環境でも動作する **ZIP デプロイ（`--deploy-mode code`）** を使う。
+
+**1) Foundry リソースを作成**（RG 名を固定したいので `az` で先に作る）
+
+```powershell
+az group create --name RG-Harness-Test --location eastus2
+
+$acct = "harness-foundry-<unique>"
+az cognitiveservices account create --name $acct --resource-group RG-Harness-Test `
+    --location eastus2 --kind AIServices --sku S0 --custom-domain $acct --assign-identity --yes
+
+az cognitiveservices account project create --project-name harness-proj `
+    --name $acct --resource-group RG-Harness-Test --location eastus2
+
+az cognitiveservices account deployment create --name $acct --resource-group RG-Harness-Test `
+    --deployment-name gpt-5.6-terra --model-name gpt-5.6-terra --model-version 2026-07-09 `
+    --model-format OpenAI --sku-name GlobalStandard --sku-capacity 50
+```
+
+**2) 自分にデータプレーン権限を付与**（ローカル実行・ベンチ用）
+
+```powershell
+az role assignment create --assignee (az ad signed-in-user show --query id -o tsv) `
+    --role "Cognitive Services User" `
+    --scope "/subscriptions/<sub>/resourceGroups/RG-Harness-Test"
+```
+
+**3) 各エージェントを初期化してデプロイ**
 
 ```powershell
 python tools\sync_shared.py        # ← deploy 前に必ず実行 (shared/ を同梱するため)
 
+$projId = az cognitiveservices account project show --project-name harness-proj `
+    --name $acct --resource-group RG-Harness-Test --query id -o tsv
+
 cd agents\maf
-azd ai agent init --protocol responses --deploy-mode code
-azd provision                      # 初回のみ: RG-Harness-Test / Foundry / モデル / App Insights
-azd ai agent run                   # ローカル起動 (http://localhost:8088)
-azd ai agent invoke --local "APIのページネーションはどちらを選ぶべきか"
-azd deploy                         # Hosted Agent へデプロイ
-azd ai agent invoke "APIのページネーションはどちらを選ぶべきか"
+azd ai agent init --no-prompt --project-id $projId --deploy-mode code `
+    --runtime python_3_13 --entry-point main.py --protocol responses `
+    --agent-name three-step-maf --model-deployment gpt-5.6-terra --src .
+azd deploy
+azd ai agent invoke three-step-maf "APIのページネーションはどちらを選ぶべきか"
+
+cd ..\copilot
+azd ai agent init --no-prompt --project-id $projId --deploy-mode code `
+    --runtime python_3_13 --entry-point main.py --protocol responses `
+    --agent-name three-step-copilot --model-deployment gpt-5.6-terra --src .
+# 生成された azure.yaml に env / container リソースを追記してから
+azd deploy
+azd ai agent invoke three-step-copilot "APIのページネーションはどちらを選ぶべきか"
 ```
 
-Copilot SDK 版も同様です。ZIP デプロイで Copilot CLI ランタイムの取得に失敗する場合は、
-同梱の `Dockerfile` を使うコンテナデプロイへ切り替えます。
+> **Copilot SDK 版で必須の設定（実測で判明）**
+> `azure.yaml` の `env` に `COPILOT_PROVIDER_TYPE: openai` を指定すること。
+> Hosted Agent のエージェント ID は **Foundry プロジェクト経路しか使えず**、
+> Azure OpenAI ホスト直叩き（`type=azure`）は RBAC を足しても `PermissionDenied` になる。
+> それぞれ必要な audience が異なる点も注意（`main.py` が自動で切り替える）。
+>
+> | 経路 | `COPILOT_PROVIDER_TYPE` | audience |
+> |---|---|---|
+> | Foundry プロジェクト | `openai` | `https://ai.azure.com/.default` |
+> | Azure OpenAI ホスト | `azure` | `https://cognitiveservices.azure.com/.default` |
+
+**4) デプロイのトラブルシュート**
 
 ```powershell
-cd ..\copilot
-azd ai agent init --protocol responses --deploy-mode code
-azd deploy
+azd ai agent show three-step-copilot      # status / エージェント ID / エンドポイント
+azd ai agent monitor three-step-copilot   # コンテナの stdout/stderr をストリーム
+azd ai agent sessions list --agent-name three-step-copilot
 ```
-
-> `azd provision` で Foundry プロジェクトを **新規作成** してください。
-> 既存プロジェクトを選ぶと `azd down` がプロジェクトと RG を残すため、後片付けが漏れます。
 
 ### 5.3 モデルデプロイの確認
 
@@ -167,18 +211,19 @@ az cognitiveservices account deployment list `
 ## 6. 比較の実行
 
 ```powershell
-# デプロイ済みエンドポイントを叩く場合はトークンが必要
+# デプロイ済みエンドポイントを叩くには Entra トークンが必要 (audience は ai.azure.com)
 $env:HARNESS_BEARER = (az account get-access-token --resource https://ai.azure.com --query accessToken -o tsv)
+$base = "https://<account>.services.ai.azure.com/api/projects/<project>/agents"
 
-# コールドスタート (デプロイ直後 / アイドル後に実行)
-python bench\run_compare.py --cold `
-    --maf-url     "<maf-agent-endpoint>/responses" `
-    --copilot-url "<copilot-agent-endpoint>/responses"
+# コールドスタート
+python bench\run_compare.py --cold --timeout 300 `
+    --maf-url     "$base/three-step-maf/endpoint/protocols/openai/responses?api-version=v1" `
+    --copilot-url "$base/three-step-copilot/endpoint/protocols/openai/responses?api-version=v1"
 
-# ウォーム計測 (5 入力 × 5 反復 = 実装ごとに 25 サンプル)
-python bench\run_compare.py --iterations 5 `
-    --maf-url     "<maf-agent-endpoint>/responses" `
-    --copilot-url "<copilot-agent-endpoint>/responses"
+# ウォーム計測 (5 入力 × 3 反復 = 実装ごとに 15 サンプル)
+python bench\run_compare.py --iterations 3 --timeout 300 `
+    --maf-url     "$base/three-step-maf/endpoint/protocols/openai/responses?api-version=v1" `
+    --copilot-url "$base/three-step-copilot/endpoint/protocols/openai/responses?api-version=v1"
 
 # 集計して REPORT.md へ貼る
 python bench\analyze.py --out bench_result.md
@@ -187,6 +232,9 @@ python bench\analyze.py --out bench_result.md
 `run_compare.py` はクライアント側の E2E レイテンシに加えて、
 応答 JSON に同梱された `trace`（ステップ別レイテンシ・トークン）も収集します。
 Hosted Agent のコンテナ内 JSONL は取り出せないため、この同梱トレースが唯一のステップ別データ源です。
+
+> セッション ID を指定しないため、**リクエストごとに新しいエージェントセッションが生成されます**。
+> つまりすべてのサンプルがセッション初期化を含みます（`azd ai agent sessions list` で確認可能）。
 
 ---
 
@@ -200,8 +248,8 @@ Hosted Agent のコンテナ内 JSONL は取り出せないため、この同梱
 | `HARNESS_LOG_DIR` | JSONL 出力先。未設定なら `$HOME/harness-logs` | 両方 |
 | `HARNESS_PROTOCOL` | ログに記録するプロトコル名 | 両方 |
 | `HARNESS_STEP_TIMEOUT` | 1 ステップのタイムアウト秒（既定 120） | Copilot |
-| `COPILOT_PROVIDER_TYPE` | `openai`（既定）/ `azure` | Copilot |
-| `AZURE_OPENAI_ENDPOINT` | `type=azure` のときのホスト。**パスを付けない** | Copilot |
+| `COPILOT_PROVIDER_TYPE` | `openai`（Foundry プロジェクト経路 / Hosted Agent 既定）/ `azure`（AOAI ホスト経路 / ローカル既定） | Copilot |
+| `AZURE_OPENAI_ENDPOINT` | `type=azure` のときのホスト。**パスを付けない**。未設定なら `FOUNDRY_PROJECT_ENDPOINT` から自動導出 | Copilot |
 | `COPILOT_API_VERSION` | `type=azure` のときの api_version | Copilot |
 | `COPILOT_CLIENT_MODE` | `empty`（既定）/ `copilot-cli` | Copilot |
 | `COPILOT_SYSTEM_MESSAGE_MODE` | `replace`（既定）/ `append` | Copilot |
@@ -222,14 +270,10 @@ Hosted Agent のコンテナ内 JSONL は取り出せないため、この同梱
 | Hosted Agent 実行基盤 | 実行時間従量 | 検証規模では小 |
 
 ```powershell
-cd agents\maf     ; azd down
-cd ..\copilot     ; azd down
-```
+# azd 環境が既存プロジェクトを参照している場合、azd down はリソースを残します。
+# 本ハーネスは RG を専用に切っているため、RG ごと削除するのが確実です。
+az group delete --name RG-Harness-Test --yes --no-wait
 
-`azd down` は **その azd 環境が作成した** RG を削除します。
-既存プロジェクトを選択していた場合はリソースが残るため、`RG-Harness-Test` を直接確認してください。
-
-```powershell
 az group show --name RG-Harness-Test -o table   # 残っていないか確認
 ```
 

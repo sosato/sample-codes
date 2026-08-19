@@ -23,8 +23,10 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+_HERE = Path(__file__).resolve()
+for _candidate in (_HERE.parent, *_HERE.parents[1:3]):
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
 
 from main import ThreeStepRunner  # noqa: E402
 

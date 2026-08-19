@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: copilot
+services:
+    harness-proj:
+        host: azure.ai.project
+        endpoint: https://harness-foundry-92361.services.ai.azure.com/api/projects/harness-proj
+    three-step-copilot:
+        project: .
+        host: azure.ai.agent
+        language: python
+        uses:
+            - harness-proj
+        env:
+            AZURE_AI_MODEL_DEPLOYMENT_NAME: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
+            # Hosted Agent のエージェント ID は自プロジェクトに対してのみ権限を持つ。
+            # Azure OpenAI ホスト直叩き (type=azure) は PermissionDenied になるため、
+            # Foundry プロジェクトの /openai/v1/ ルートを使う
+            # (audience は https://ai.azure.com/.default)。
+            COPILOT_PROVIDER_TYPE: openai
+            # Copilot CLI の状態書き込み先。$HOME はターン間で永続化される。
+            COPILOT_HOME: /home/site/.copilot
+            # 素の推論に近づける
+            COPILOT_CLIENT_MODE: empty
+            COPILOT_SYSTEM_MESSAGE_MODE: replace
+            HARNESS_PROTOCOL: responses
+        codeConfiguration:
+            dependencyResolution: remote_build
+            entryPoint: main.py
+            runtime: python_3_13
+        container:
+            resources:
+                # Copilot CLI ランタイム (151.6 MB のネイティブバイナリ) を
+                # 子プロセスとして起動するため MAF 版より多くのリソースを割り当てる。
+                cpu: "1.0"
+                memory: 2Gi
+        kind: hosted
+        name: three-step-copilot
+        protocols:
+            - protocol: responses
+              version: 2.0.0
+infra:
+    provider: microsoft.foundry

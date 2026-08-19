@@ -43,8 +43,12 @@ from typing import Any
 
 # `shared` は deploy 時に tools/sync_shared.py でこのディレクトリ配下へ複製される。
 # ローカル開発時はリポジトリ直下の正本を使う。
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Hosted Agent のコンテナでは `/app/main.py` に配置されるため親が 2 階層存在しない。
+# IndexError で起動不能にならないよう、存在する親だけを追加する。
+_HERE = Path(__file__).resolve()
+for _candidate in (_HERE.parent, *_HERE.parents[1:3]):
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
 
 from agent_framework import (  # noqa: E402
     Message,
@@ -158,8 +162,9 @@ def _step_agent(step: prompts.StepSpec) -> Any:
 def _usage(response: Any) -> tuple[int | None, int | None]:
     """応答オブジェクトからトークン使用量を防御的に取り出す。
 
-    MAF は prerelease でありプロパティ名が変わりうるため、
-    複数の候補を順に試し、取れなければ None を返す。
+    MAF 1.13 の `AgentResponse.usage_details` は **dict** で、
+    `input_token_count` / `output_token_count` を持つ（実測）。
+    prerelease で形が変わりうるため、dict / 属性の両方と複数のキー名を試す。
     """
     for attr in ("usage_details", "usage", "response_usage"):
         usage = getattr(response, attr, None)
@@ -170,9 +175,12 @@ def _usage(response: Any) -> tuple[int | None, int | None]:
             ("prompt_tokens", "completion_tokens"),
             ("input_tokens", "output_tokens"),
         ):
-            got_in = getattr(usage, in_key, None)
-            got_out = getattr(usage, out_key, None)
-            if got_in is not None or got_out is not None:
+            if isinstance(usage, dict):
+                got_in, got_out = usage.get(in_key), usage.get(out_key)
+            else:
+                got_in = getattr(usage, in_key, None)
+                got_out = getattr(usage, out_key, None)
+            if isinstance(got_in, int) or isinstance(got_out, int):
                 return got_in, got_out
     return None, None
 

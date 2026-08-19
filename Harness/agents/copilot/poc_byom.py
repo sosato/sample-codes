@@ -36,12 +36,17 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+_HERE = Path(__file__).resolve()
+for _candidate in (_HERE.parent, *_HERE.parents[1:3]):
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
+
+from shared.tracing import ensure_utf8_stdout  # noqa: E402
 
 TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
 DEFAULT_MODEL = "gpt-5.6-terra"
@@ -105,9 +110,34 @@ def _candidates(token: str) -> list[tuple[str, dict[str, Any]]]:
     return out
 
 
+def _base_directory() -> str:
+    """Copilot CLI の状態書き込み先を確保する。
+
+    `mode="empty"` は暗黙の `~/.copilot` フォールバックを行わず、
+    `base_directory` / `session_fs` / URI 接続のいずれかを必須とする
+    (``ValueError: CopilotClient(mode='empty') requires base_directory...``)。
+    """
+    configured = os.environ.get("COPILOT_HOME")
+    candidates = [
+        configured,
+        str(Path(os.path.expanduser("~")) / ".copilot-harness"),
+        str(Path(tempfile.gettempdir()) / "copilot-harness"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            return str(path)
+        except OSError:
+            continue
+    raise RuntimeError("No writable base directory for the Copilot CLI")
+
+
 async def _probe(label: str, provider: dict[str, Any]) -> tuple[bool, str, float]:
     """1 構成で 1 発だけ推論して結果を返す。"""
-    from copilot import CopilotClient
+    from copilot import CopilotClient, ToolSet
     from copilot.session import PermissionHandler
     from copilot.session_events import AssistantMessageData, SessionIdleData
 
@@ -116,11 +146,17 @@ async def _probe(label: str, provider: dict[str, Any]) -> tuple[bool, str, float
     done = asyncio.Event()
 
     try:
-        async with CopilotClient(mode="empty") as client:
+        async with CopilotClient(
+            mode=os.environ.get("COPILOT_CLIENT_MODE", "empty"),
+            base_directory=_base_directory(),
+        ) as client:
             async with await client.create_session(
                 on_permission_request=PermissionHandler.approve_all,
                 model=_model(),
                 provider=provider,
+                # `mode="empty"` は各セッションが使うツールの明示を要求する。
+                # 純粋な推論比較なのでツールは 1 つも足さない。
+                available_tools=ToolSet(),
             ) as session:
 
                 def on_event(event: Any) -> None:
@@ -196,6 +232,7 @@ async def main_async() -> int:
 
 
 def main() -> int:
+    ensure_utf8_stdout()
     return asyncio.run(main_async())
 
 

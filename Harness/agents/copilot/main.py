@@ -36,13 +36,18 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+# Hosted Agent のコンテナでは `/app/main.py` に配置され親が 2 階層存在しないため、
+# 存在する親だけを sys.path へ追加する (IndexError で起動不能になるのを防ぐ)。
+_HERE = Path(__file__).resolve()
+for _candidate in (_HERE.parent, *_HERE.parents[1:3]):
+    if _candidate.is_dir() and str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
 
 from shared import prompts  # noqa: E402
 from shared.tracing import (  # noqa: E402
@@ -55,6 +60,12 @@ from shared.tracing import (  # noqa: E402
 IMPL = "copilot-sdk"
 DEFAULT_MODEL = "gpt-5.6-terra"
 TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
+# Foundry プロジェクトの OpenAI 互換ルートは別の audience を要求する。
+# (実測: cognitiveservices の audience だと
+#  "401 Unauthorized. ... audience is incorrect (https://ai.azure.com)")
+FOUNDRY_TOKEN_SCOPE = "https://ai.azure.com/.default"
+# PoC で疎通確認済みの api_version (poc_byom_result.json)
+DEFAULT_API_VERSION = "2025-04-01-preview"
 STEP_TIMEOUT_SECONDS = float(os.environ.get("HARNESS_STEP_TIMEOUT", "120"))
 # 失効の少し前に取り直す (bearer_token は自動更新されない)
 TOKEN_REFRESH_MARGIN_SECONDS = 300.0
@@ -74,56 +85,93 @@ def _protocol() -> str:
 # 認証 (R3: bearer_token の失効対策)
 # ---------------------------------------------------------------------------
 class _TokenCache:
-    """`DefaultAzureCredential` のトークンを期限管理付きでキャッシュする。"""
+    """`DefaultAzureCredential` のトークンをスコープ別・期限管理付きでキャッシュする。
+
+    MAF の `FoundryChatClient` は audience の選択を内部で吸収するが、
+    Copilot SDK の BYOM では呼び出し先に応じた audience を**自分で選ぶ**必要がある。
+    """
 
     def __init__(self) -> None:
-        self._token: str | None = None
-        self._expires_on: float = 0.0
+        self._tokens: dict[str, tuple[str, float]] = {}
         self._credential: Any = None
         self._lock = asyncio.Lock()
 
-    async def get(self) -> str:
+    async def get(self, scope: str) -> str:
         async with self._lock:
             now = time.time()
-            if self._token and now < self._expires_on - TOKEN_REFRESH_MARGIN_SECONDS:
-                return self._token
+            cached = self._tokens.get(scope)
+            if cached and now < cached[1] - TOKEN_REFRESH_MARGIN_SECONDS:
+                return cached[0]
             if self._credential is None:
                 from azure.identity import DefaultAzureCredential
 
                 self._credential = DefaultAzureCredential()
             # 同期 API のためスレッドへ逃がす
-            access = await asyncio.to_thread(self._credential.get_token, TOKEN_SCOPE)
-            self._token = access.token
-            self._expires_on = float(getattr(access, "expires_on", now + 3600))
-            return self._token
+            access = await asyncio.to_thread(self._credential.get_token, scope)
+            expires_on = float(getattr(access, "expires_on", now + 3600))
+            self._tokens[scope] = (access.token, expires_on)
+            return access.token
 
 
 _TOKENS = _TokenCache()
 
 
+def _derive_azure_openai_endpoint() -> str | None:
+    """Foundry プロジェクトのエンドポイントから Azure OpenAI ホストを導出する。
+
+    Hosted Agent が自動注入するのは ``FOUNDRY_PROJECT_ENDPOINT`` だけだが、
+    Copilot SDK の BYOM は Azure OpenAI ホスト形式でしか疎通しないことが
+    実測で判明したため（PoC 結果: `poc_byom_result.json`）、ここで導出する。
+
+        https://<account>.services.ai.azure.com/api/projects/<project>
+          -> https://<account>.openai.azure.com
+    """
+    explicit = os.environ.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+    if explicit:
+        return explicit
+
+    project = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "")
+    match = re.match(r"https://([^.]+)\.services\.ai\.azure\.com", project)
+    if match:
+        return f"https://{match.group(1)}.openai.azure.com"
+    return None
+
+
 async def build_provider() -> dict[str, Any]:
-    """BYOM のプロバイダー設定を都度組み立てる (トークンは毎回検証済みのものを使う)。"""
-    token = await _TOKENS.get()
-    provider_type = os.environ.get("COPILOT_PROVIDER_TYPE", "openai").lower()
+    """BYOM のプロバイダー設定を都度組み立てる (トークンは毎回検証済みのものを使う)。
+
+    2 経路あり、**必要な audience が異なる**点が実装上の落とし穴になる:
+
+    * ``azure``  : Azure OpenAI ホスト直叩き。audience は cognitiveservices。
+      ローカル (ユーザー資格情報) では動くが、Hosted Agent のエージェント ID では
+      ``PermissionDenied`` になる (実測)。
+    * ``openai`` : Foundry プロジェクトの ``/openai/v1/`` ルート。audience は ai.azure.com。
+      エージェント ID が自プロジェクトに対して自動的に権限を持つため、
+      **Hosted Agent ではこちらが既定**。
+    """
+    provider_type = os.environ.get(
+        "COPILOT_PROVIDER_TYPE", "azure" if _is_local_run() else "openai"
+    ).lower()
 
     if provider_type == "azure":
-        base_url = os.environ.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+        base_url = _derive_azure_openai_endpoint()
         if not base_url:
             raise RuntimeError(
-                "COPILOT_PROVIDER_TYPE=azure には AZURE_OPENAI_ENDPOINT が必要です "
-                "(例: https://<account>.openai.azure.com)。パスは付けないこと。"
+                "AZURE_OPENAI_ENDPOINT を解決できません。"
+                "https://<account>.openai.azure.com を設定してください (パスは付けない)。"
             )
-        provider: dict[str, Any] = {
+        return {
             "type": "azure",
             "base_url": base_url,
-            "bearer_token": token,
+            "bearer_token": await _TOKENS.get(TOKEN_SCOPE),
             # wire_api="responses" は store:false で 400 になり多ターンが壊れる。
             "wire_api": "completions",
+            "azure": {
+                "api_version": os.environ.get(
+                    "COPILOT_API_VERSION", DEFAULT_API_VERSION
+                )
+            },
         }
-        api_version = os.environ.get("COPILOT_API_VERSION")
-        if api_version:
-            provider["azure"] = {"api_version": api_version}
-        return provider
 
     project = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "").rstrip("/")
     if not project:
@@ -134,9 +182,18 @@ async def build_provider() -> dict[str, Any]:
     return {
         "type": "openai",
         "base_url": f"{project}/openai/v1/",
-        "bearer_token": token,
+        "bearer_token": await _TOKENS.get(FOUNDRY_TOKEN_SCOPE),
         "wire_api": "completions",
     }
+
+
+def _is_local_run() -> bool:
+    """Hosted Agent のサンドボックス内かどうかを推定する。
+
+    ホスティング基盤は App Insights の接続文字列を必ず注入するため、
+    その有無を判定材料に使う。
+    """
+    return not os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING")
 
 
 # ---------------------------------------------------------------------------
@@ -147,18 +204,30 @@ def prepare_runtime_env() -> None:
 
     Hosted Agent のサンドボックスでは書き込み可能パスが限られる。
     `$HOME` はターン間で永続化されるため、既定で `$HOME/.copilot` を使う。
+    `mode="empty"` は暗黙のフォールバックを行わず `base_directory` を必須とするため、
+    ここで必ず解決しておく。
     """
-    if not os.environ.get("COPILOT_HOME"):
-        home = Path(os.path.expanduser("~")) / ".copilot"
+    configured = os.environ.get("COPILOT_HOME")
+    if configured:
         try:
-            home.mkdir(parents=True, exist_ok=True)
-            os.environ["COPILOT_HOME"] = str(home)
+            Path(configured).mkdir(parents=True, exist_ok=True)
+            return
         except OSError:
-            import tempfile
+            pass
 
-            fallback = Path(tempfile.gettempdir()) / "copilot-home"
-            fallback.mkdir(parents=True, exist_ok=True)
-            os.environ["COPILOT_HOME"] = str(fallback)
+    import tempfile
+
+    for candidate in (
+        Path(os.path.expanduser("~")) / ".copilot-harness",
+        Path(tempfile.gettempdir()) / "copilot-harness",
+    ):
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            os.environ["COPILOT_HOME"] = str(candidate)
+            return
+        except OSError:
+            continue
+    raise RuntimeError("No writable base directory for the Copilot CLI")
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +258,9 @@ class ThreeStepRunner:
             client = CopilotClient(
                 # "empty" は CLI 既定のコーディングエージェント向けプロンプト/
                 # ツール/メモリを載せない。素の推論比較のため既定でこちらを使う。
+                # ただし base_directory と各セッションの available_tools が必須になる。
                 mode=os.environ.get("COPILOT_CLIENT_MODE", "empty"),
-                base_directory=os.environ.get("COPILOT_HOME"),
+                base_directory=os.environ["COPILOT_HOME"],
             )
             await client.start()
             self._client = client
@@ -206,23 +276,40 @@ class ThreeStepRunner:
     async def _send_step(
         self, step: prompts.StepSpec, user_text: str
     ) -> tuple[str, int | None, int | None]:
-        """1 ステップ = 1 セッションを作り、応答テキストを回収する。"""
+        """1 ステップ = 1 セッションを作り、応答テキストを回収する。
+
+        Copilot SDK はモデル呼び出しの失敗を**例外ではなくイベント**で通知するため、
+        `ModelCallFailureData` / `SessionErrorData` を購読しないと
+        「例外なし・応答も空」という無音の失敗になる。ここで明示的に拾って送出する。
+        """
         if self._fake:
             return _fake_step_output(step), None, None
 
+        from copilot import ToolSet
         from copilot.session import PermissionHandler
-        from copilot.session_events import AssistantMessageData, SessionIdleData
+        from copilot.session_events import (
+            AssistantMessageData,
+            AssistantUsageData,
+            ModelCallFailureData,
+            SessionErrorData,
+            SessionIdleData,
+        )
 
         client = await self._get_client()
         provider = await build_provider()
 
         chunks: list[str] = []
+        failures: list[str] = []
+        usage: dict[str, int | None] = {"input": None, "output": None}
         done = asyncio.Event()
 
         session = await client.create_session(
             on_permission_request=PermissionHandler.approve_all,
             model=_model_name(),
             provider=provider,
+            # `mode="empty"` は各セッションが使うツールの明示を要求する。
+            # 純粋な推論比較なのでツールは 1 つも足さない。
+            available_tools=ToolSet(),
             system_message={
                 "mode": os.environ.get("COPILOT_SYSTEM_MESSAGE_MODE", "replace"),
                 "content": step.system,
@@ -234,6 +321,28 @@ class ThreeStepRunner:
                 match event.data:
                     case AssistantMessageData() as data:
                         chunks.append(str(data.content))
+                    case AssistantUsageData() as data:
+                        usage["input"] = getattr(data, "input_tokens", None)
+                        usage["output"] = getattr(data, "output_tokens", None)
+                    case ModelCallFailureData() as data:
+                        failures.append(
+                            "ModelCallFailure("
+                            f"kind={getattr(data, 'failure_kind', None)}, "
+                            f"code={getattr(data, 'error_code', None)}, "
+                            f"type={getattr(data, 'error_type', None)}, "
+                            f"model={getattr(data, 'model', None)}, "
+                            f"endpoint={getattr(data, 'api_endpoint', None)}): "
+                            f"{getattr(data, 'error_message', None)}"
+                        )
+                        done.set()
+                    case SessionErrorData() as data:
+                        failures.append(
+                            "SessionError("
+                            f"code={getattr(data, 'error_code', None)}, "
+                            f"status={getattr(data, 'status_code', None)}, "
+                            f"url={getattr(data, 'url', None)})"
+                        )
+                        done.set()
                     case SessionIdleData():
                         done.set()
 
@@ -241,16 +350,16 @@ class ThreeStepRunner:
             await session.send(user_text)
             await asyncio.wait_for(done.wait(), timeout=STEP_TIMEOUT_SECONDS)
         finally:
-            with_suppress = getattr(session, "disconnect", None)
-            if with_suppress is not None:
+            if getattr(session, "disconnect", None) is not None:
                 try:
                     await session.disconnect()
                 except Exception:  # noqa: BLE001 - クリーンアップ失敗は握りつぶす
                     pass
 
-        # Copilot SDK はトークン使用量を公開していないため None を記録する
-        # (これ自体が MAF との可観測性の差分として REPORT に載る)。
-        return "".join(chunks).strip(), None, None
+        text = "".join(chunks).strip()
+        if failures and not text:
+            raise RuntimeError("; ".join(failures))
+        return text, usage["input"], usage["output"]
 
     async def run(
         self, problem: str, *, input_id: str = "adhoc", iteration: int = 0
@@ -359,7 +468,14 @@ def build_app() -> Any:
         _cancellation_signal: asyncio.Event,
     ):
         user_input = await context.get_input_text() or ""
-        result = await runner.run(user_input)
+        try:
+            result: dict[str, Any] = await runner.run(user_input)
+        except Exception as exc:  # noqa: BLE001 - 失敗内容を呼び出し側へ返す
+            result = {
+                "impl": IMPL,
+                "final_answer": "",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         return TextResponse(
             context, request, text=json.dumps(result, ensure_ascii=False)
         )
