@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.venv/
+artifacts/
+__pycache__/
+*.py[cod]
+uv.lock
+.docker/
+compose.override.yml
+docker-compose.override.yml

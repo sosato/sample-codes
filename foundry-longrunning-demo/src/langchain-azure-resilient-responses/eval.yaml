@@ -1,0 +1,7 @@
+name: smoke-core
+agent:
+    name: langchain-azure-resilient-responses-steerable
+    kind: hosted
+options:
+    eval_model: gpt-5.6-sol
+max_samples: 15

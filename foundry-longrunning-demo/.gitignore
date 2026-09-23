@@ -1,0 +1,32 @@
+# Local virtualenv
+.venv/
+__pycache__/
+uv.lock
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Local LangGraph checkpoints
+checkpoints.sqlite
+checkpoints.sqlite-*
+
+# Local resilient task/response/stream stores
+.agentserver/
+
+# Temp/install logs
+*.log
+
+# Local probe and deployment results
+*-results*.json
+webapp/*-probe*.json
+
+# Local Docker overrides and state
+.docker/
+compose.override.yml
+docker-compose.override.yml
+
+# In-place azd state
+.azure/
+.azure

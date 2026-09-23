@@ -1,0 +1,1 @@
+Evaluate a resilient and steerable long-running trip-planning agent for background execution, reconnectable streaming, crash recovery, and human approval before booking.

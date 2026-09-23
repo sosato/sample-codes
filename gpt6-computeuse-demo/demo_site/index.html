@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Travel Request Demo</title>
+  <style>
+    :root {
+      color: #171717;
+      background: #f4f6f8;
+      font-family: "Segoe UI", sans-serif;
+    }
+    body {
+      margin: 0;
+      display: grid;
+      min-height: 100vh;
+      place-items: center;
+    }
+    main {
+      width: min(720px, calc(100% - 48px));
+      padding: 36px;
+      border: 1px solid #d7dce2;
+      border-radius: 18px;
+      background: white;
+      box-shadow: 0 18px 50px rgb(23 23 23 / 10%);
+    }
+    h1 {
+      margin: 0 0 8px;
+    }
+    p {
+      color: #555;
+    }
+    form {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-top: 28px;
+    }
+    label, fieldset {
+      display: grid;
+      gap: 8px;
+      font-weight: 600;
+    }
+    input, select, button {
+      padding: 12px;
+      border: 1px solid #aeb7c2;
+      border-radius: 8px;
+      font: inherit;
+    }
+    fieldset {
+      grid-column: 1 / -1;
+      grid-template-columns: repeat(3, 1fr);
+      border: 1px solid #d7dce2;
+      border-radius: 10px;
+      padding: 16px;
+    }
+    legend {
+      padding: 0 8px;
+    }
+    fieldset label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 400;
+    }
+    button {
+      grid-column: 1 / -1;
+      border: 0;
+      color: white;
+      background: #1267d6;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    #result {
+      margin-top: 24px;
+      padding: 18px;
+      border-left: 5px solid #1267d6;
+      background: #eef5ff;
+      white-space: pre-line;
+    }
+    [hidden] {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Travel Request</h1>
+    <p>Configure a sample trip and generate a request summary.</p>
+    <form id="travel-form">
+      <label>
+        Destination
+        <input id="destination" name="destination" placeholder="City" autocomplete="off">
+      </label>
+      <label>
+        Travelers
+        <select id="travelers" name="travelers">
+          <option value="1">1 traveler</option>
+          <option value="2">2 travelers</option>
+          <option value="3">3 travelers</option>
+          <option value="4">4 travelers</option>
+        </select>
+      </label>
+      <label>
+        Budget (USD)
+        <input id="budget" name="budget" type="number" min="100" step="100" value="1000">
+      </label>
+      <label>
+        Pace
+        <select id="pace" name="pace">
+          <option>Relaxed</option>
+          <option>Balanced</option>
+          <option>Active</option>
+        </select>
+      </label>
+      <fieldset>
+        <legend>Options</legend>
+        <label><input id="breakfast" type="checkbox"> Breakfast</label>
+        <label><input id="transfer" type="checkbox"> Airport transfer</label>
+        <label><input id="tour" type="checkbox"> Guided tour</label>
+      </fieldset>
+      <button type="submit">Generate request</button>
+    </form>
+    <section id="result" aria-live="polite" hidden></section>
+  </main>
+  <script>
+    document.querySelector("#travel-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const selected = [
+        ["Breakfast", document.querySelector("#breakfast").checked],
+        ["Airport transfer", document.querySelector("#transfer").checked],
+        ["Guided tour", document.querySelector("#tour").checked],
+      ].filter(([, enabled]) => enabled).map(([name]) => name);
+      const result = document.querySelector("#result");
+      result.textContent = [
+        "Request generated",
+        `Destination: ${document.querySelector("#destination").value}`,
+        `Travelers: ${document.querySelector("#travelers").value}`,
+        `Budget: $${document.querySelector("#budget").value}`,
+        `Pace: ${document.querySelector("#pace").value}`,
+        `Options: ${selected.join(", ") || "None"}`,
+      ].join("\n");
+      result.hidden = false;
+    });
+  </script>
+</body>
+</html>

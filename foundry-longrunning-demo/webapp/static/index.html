@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Foundry Trip Advisor</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">MICROSOFT FOUNDRY AGENT DEMO</p>
+      <h1>Trip Advisor</h1>
+      <p class="hero-copy">Web 検索でフライト・ホテル・体験を調査し、家族旅行から出張まで旅程を組み立てます。</p>
+    </div>
+    <div class="hero-badge">
+      <span class="pulse"></span>
+      Grounded with Web Search
+    </div>
+  </header>
+
+  <main>
+    <section class="panel planner-panel">
+      <div class="section-title">
+        <div>
+          <p class="step">01</p>
+          <h2>旅行条件</h2>
+        </div>
+        <button id="sampleButton" class="secondary-button" type="button">タイ家族旅行サンプル</button>
+      </div>
+
+      <form id="tripForm">
+        <div class="segmented" role="group" aria-label="旅行タイプ">
+          <label><input type="radio" name="trip_type" value="private" checked><span>Private Trip</span></label>
+          <label><input type="radio" name="trip_type" value="business"><span>Business Trip</span></label>
+        </div>
+
+        <div class="field-grid">
+          <label>利用モデル
+            <select id="model" name="model"></select>
+          </label>
+          <label>出発地
+            <input id="origin" name="origin" value="東京" required>
+          </label>
+          <label>目的地
+            <input id="destination" name="destination" placeholder="バンコク、プーケット" required>
+          </label>
+          <label>出発日
+            <input id="startDate" name="start_date" type="date" required>
+          </label>
+          <label>帰着日
+            <input id="endDate" name="end_date" type="date" required>
+          </label>
+          <label>大人
+            <input id="adults" name="adults" type="number" min="1" max="12" value="2">
+          </label>
+          <label>子ども
+            <input id="children" name="children" type="number" min="0" max="12" value="2">
+          </label>
+          <label>予算
+            <input id="budget" name="budget" placeholder="総額 60万円程度">
+          </label>
+        </div>
+
+        <label>興味・優先事項
+          <input id="interests" name="interests" placeholder="家族向け、ビーチ、タイ料理、移動を詰め込みすぎない">
+        </label>
+        <label>補足
+          <textarea id="notes" name="notes" rows="3" placeholder="子どもの年齢、ホテルの希望、避けたい条件など"></textarea>
+        </label>
+
+        <button id="submitButton" class="primary-button" type="submit">
+          <span>Web を調査して旅程を作成</span>
+          <span class="arrow">→</span>
+        </button>
+      </form>
+    </section>
+
+    <section class="panel result-panel">
+      <div class="section-title">
+        <div>
+          <p class="step">02</p>
+          <h2>Trip Plan</h2>
+        </div>
+        <div class="result-actions">
+          <div id="viewToggle" class="view-toggle hidden">
+            <button type="button" data-view="result" class="active">旅程結果</button>
+            <button type="button" data-view="review">実行レビュー</button>
+          </div>
+          <span id="modelBadge" class="model-badge">Model</span>
+        </div>
+      </div>
+
+      <div id="resultView">
+        <div id="emptyState" class="empty-state">
+          <div class="globe">✦</div>
+          <p>旅行条件を入力すると、Web 検索を使った旅程がここに表示されます。</p>
+        </div>
+
+        <div id="loadingState" class="loading-state hidden">
+          <div class="loader"></div>
+          <h3 id="loadingTitle">Foundry response を開始しています</h3>
+          <p id="loadingDetail">実イベントを受信すると進捗が更新されます。</p>
+          <div id="liveProgress" class="live-progress"></div>
+        </div>
+
+        <nav id="sectionNav" class="section-nav hidden" aria-label="旅程セクション"></nav>
+        <article id="answer" class="answer hidden"></article>
+        <div id="meta" class="result-meta hidden"></div>
+        <div id="citations" class="citations hidden">
+          <h3>参照した Web 情報</h3>
+          <div id="citationList" class="citation-list"></div>
+        </div>
+        <div id="error" class="error hidden"></div>
+      </div>
+
+      <div id="reviewView" class="review-view hidden">
+        <section class="review-card">
+          <div class="review-card-title">
+            <h3>実行計画と進捗</h3>
+            <span id="reviewStatus" class="status-pill">未実行</span>
+          </div>
+          <div id="planTimeline" class="plan-timeline"></div>
+        </section>
+
+        <section class="review-card">
+          <h3>Response / Progress Metadata</h3>
+          <dl id="metadataGrid" class="metadata-grid"></dl>
+          <pre id="metadataJson" class="metadata-json"></pre>
+        </section>
+
+        <section class="review-card">
+          <div class="review-card-title">
+            <h3>実行イベント</h3>
+            <button id="copyEvents" type="button" class="secondary-button">JSON をコピー</button>
+          </div>
+          <div id="eventTable" class="event-table"></div>
+        </section>
+
+        <section class="review-card">
+          <h3>Web Search アクション</h3>
+          <div id="searchActions" class="search-actions"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    価格・空席・営業時間は変動します。予約前に各事業者の公式サイトで再確認してください。
+  </footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
