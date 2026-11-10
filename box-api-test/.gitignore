@@ -1,0 +1,5 @@
+.env
+metadata-export/
+__pycache__/
+.pytest_cache/
+*.pyc
